@@ -162,9 +162,9 @@ const MediaViewerModalComponent: FC = observer(() => {
 			);
 
 			event.stopPropagation?.();
+			event.preventDefault();
 
 			if (Platform.isElectron) {
-				event.preventDefault();
 				ContextMenuActionCreators.openFromEvent(event, renderMenu);
 				return;
 			}
