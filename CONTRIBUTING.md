@@ -1,12 +1,12 @@
-# Contributing to fluxerapp/fluxer
+# Contributing to Fluxer
 
-Thanks for contributing. This document explains how we work so your changes can land smoothly, and so nobody wastes time on work we cannot merge.
+Thanks for contributing. This document explains how we work so your changes can land smoothly and nobody wastes time on work we can't merge.
 
 ## Quick rules (please read)
 
 ### 1) All PRs must target `canary`
 
-`canary` is our trunk branch. Open all pull requests against `canary`. PRs targeting other branches will be closed or you will be asked to retarget.
+`canary` is our trunk branch. Open all pull requests against `canary`. PRs targeting other branches will be closed or retargeted.
 
 ### 2) All PRs must include a short description
 
@@ -16,24 +16,34 @@ Every PR must include a short description covering:
 - why it changed
 - anything reviewers should pay attention to
 
-A few bullets is perfect.
+A few bullets is fine.
 
-### 3) Coordinate before starting larger work
+### 3) Open an issue before submitting a PR
 
-If you are planning anything beyond a small, obvious fix (new feature, meaningful refactor, new dependency, new API surface, behavior changes), coordinate with the maintainers first.
+We strongly prefer that every PR addresses an existing issue. If one doesn't exist yet, open one describing the problem or improvement and your proposed approach. This gives maintainers a chance to weigh in on direction before you invest time, and avoids the mutual displeasure of:
 
-This avoids the mutual displeasure of:
+- you doing significant work, and
+- us having to reject or postpone the change because it doesn't align with current goals, or because we aren't ready to maintain what it introduces
 
-- you investing significant time, and
-- us having to reject or postpone the change because it does not align with current goals, or because we are not ready to maintain what it introduces
+For small, obvious fixes (typos, broken links, trivial one-liners) you can skip the issue and go straight to a PR.
 
-Ways to coordinate:
+Ways to coordinate on larger work:
 
 - open an issue describing the problem and your proposed approach
 - open a draft PR early to confirm direction
 - discuss with a maintainer in any channel you already share
 
-If you are unsure whether something counts as "larger work", ask first.
+If you're unsure whether something needs an issue first, it probably does.
+
+### 4) Understand the code you submit
+
+You should understand every change in your PR well enough to explain and defend it during review. You don’t need to write an essay, but you should be able to give a brief summary of what the patch does and why it’s correct. You may not use AI to generate a bug report, pull request description, or GitHub comment in any form, except for a 1:1 translation if English isn't your native language.
+
+The maintainer [uses LLMs in a limited capacity](https://blog.fluxer.app/how-i-built-fluxer-a-discord-like-chat-app/#:~:text=The%20LLMephant%20in%20the%20room). That’s how he was able to build the final version of Fluxer largely on his own over five years, with help from a supportive group of early testers. Without limited, controlled LLM use, he likely would have needed more starting capital to achieve the same result and hire a team of engineers.
+
+If you use LLMs, use them responsibly. They can be helpful for rubber-ducking and for scaffolding boilerplate from thorough specifications, detailed guidance, and test coverage that verifies behaviour rather than implementation. This kind of platform cannot be built via autonomous code generation. Please disclose any LLM usage in your contribution.
+
+We also ask contributors to treat each other with respect on this topic. People hold a wide range of views on LLMs, often rooted in ethical conviction. A contribution that is reviewable, understandable, and properly tested should be evaluated on its merits.
 
 ## Workflow
 
@@ -48,10 +58,10 @@ We strongly prefer small, focused PRs that are easy to review.
 
 ### Commit style and history
 
-We squash-merge PRs, and the PR title becomes the single commit message on `canary`. For that reason:
+We squash-merge PRs, so the PR title becomes the single commit message on `canary`. For that reason:
 
 - PR titles must follow Conventional Commits.
-- Individual commits inside the PR do not need to follow Conventional Commits.
+- Individual commits inside the PR don't need to follow Conventional Commits.
 
 If you like to commit in small increments, feel free. If you prefer a tidier PR history, force-pushes are welcome (for example, to squash or reorder commits before review). Just avoid rewriting history in a way that makes it hard for reviewers to follow along.
 
@@ -87,17 +97,14 @@ We care about confidence more than ceremony. Add tests when they provide real va
 
 ### Backend changes
 
-For backend changes, we suggest adding an integration or unit test.
+For backend changes, add a unit test.
 
-- If a unit test would require heavy mocking to be meaningful, either:
-  - restructure the code so it can be tested without excessive mocking, or
-  - prefer an integration test if restructuring is not practical
-
-- If you are unsure which route is best, discuss it with a maintainer before investing time.
+- If a unit test would require heavy mocking to be meaningful, restructure the code so it can be tested cleanly through its interfaces.
+- If you're unsure how to approach this, discuss it with a maintainer before investing time.
 
 ### Frontend changes
 
-We generally do not encourage new unit tests for frontend code unless:
+We don't generally encourage new unit tests for frontend code unless:
 
 - the area already has unit tests, or
 - the change is complex or sensitive, and a unit test clearly reduces risk
@@ -106,31 +113,9 @@ In most cases, clear PR notes and practical verification are more valuable.
 
 ## Formatting and linting
 
-Do not block on formatting or linting before opening a PR. CI enforces required checks and will tell you what needs fixing before merge.
+Don't block on formatting or linting before opening a PR. CI enforces required checks and will tell you what needs fixing before merge.
 
-Open the PR when it is ready for review, then iterate based on CI and feedback.
-
-## CLA (required)
-
-We require a Contributor License Agreement (CLA) for this repository.
-
-Why:
-
-- The project is available under AGPLv3.
-- We also offer a commercial license for organizations that cannot (or do not want to) comply with AGPL obligations.
-- To keep both options possible, we need permission to include contributions in both distributions.
-
-What it means for you:
-
-- You keep ownership of your contribution.
-- You can keep using your contribution in your own work.
-- You grant us the rights needed to distribute your contribution as part of the project, including under a commercial license.
-- We may refactor or remove code over time and are not required to include every contribution. However, any distributed version that includes your contribution remains properly licensed under the project license(s) that applied when you contributed.
-
-How to sign:
-
-- On your first PR, a bot will comment with a CLA link.
-- Click it, sign with your GitHub account, and you are done.
+Open the PR when it's ready for review, then iterate based on CI and feedback.
 
 ## PR checklist
 
@@ -139,9 +124,9 @@ Before requesting review:
 - [ ] PR targets `canary`
 - [ ] PR title follows Conventional Commits (mostly lowercase)
 - [ ] PR includes a short description of what/why
+- [ ] You understand every change in the PR and can explain it during review
 - [ ] Tests added or updated where it makes sense (especially backend changes)
-- [ ] CI is green (or you are actively addressing failures)
-- [ ] CLA signed (the bot will guide you)
+- [ ] CI is green (or you're actively addressing failures)
 
 Optional but helpful:
 
@@ -150,13 +135,13 @@ Optional but helpful:
 
 ## Code of Conduct
 
-This project follows a Code of Conduct. By participating, you are expected to uphold it:
+This project follows a Code of Conduct. By participating, you're expected to uphold it:
 
 - See [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
 
 ## Security
 
-Please do not report security issues via public GitHub issues.
+Please don't report security issues via public GitHub issues.
 
 Use our security policy and reporting instructions here:
 

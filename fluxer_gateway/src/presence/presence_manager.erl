@@ -20,7 +20,18 @@
 
 -include_lib("fluxer_gateway/include/timeout_config.hrl").
 
--export([start_link/0, lookup/1, dispatch_to_user/3, terminate_all_sessions/1]).
+-define(PID_CACHE_TABLE, presence_pid_cache).
+-define(SHARD_TABLE, presence_manager_shard_table).
+-define(CACHE_TTL_MS, 300000).
+
+-export([
+    start_link/0,
+    lookup/1,
+    lookup_async/2,
+    start_or_lookup/1,
+    dispatch_to_user/3,
+    terminate_all_sessions/1
+]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -type user_id() :: integer().
@@ -34,37 +45,101 @@ start_link() ->
 
 -spec lookup(user_id()) -> {ok, pid()} | {error, not_found}.
 lookup(UserId) ->
-    gen_server:call(?MODULE, {lookup, UserId}, ?DEFAULT_GEN_SERVER_TIMEOUT).
+    case check_cache(UserId) of
+        {hit, Pid} ->
+            {ok, Pid};
+        miss ->
+            lookup_and_cache(UserId)
+    end.
+
+-spec start_or_lookup(map()) -> {ok, pid()} | {error, term()}.
+start_or_lookup(Request) when is_map(Request) ->
+    UserId = maps:get(user_id, Request, 0),
+    call_shard(UserId, {start_or_lookup, Request}, ?DEFAULT_GEN_SERVER_TIMEOUT).
+
+-spec lookup_async(user_id(), term()) -> ok.
+lookup_async(UserId, Message) ->
+    case check_cache(UserId) of
+        {hit, Pid} ->
+            gen_server:cast(Pid, Message);
+        miss ->
+            spawn(fun() -> lookup_and_cast(UserId, Message) end)
+    end,
+    ok.
+
+-spec check_cache(user_id()) -> {hit, pid()} | miss.
+check_cache(UserId) ->
+    case ets:lookup(?PID_CACHE_TABLE, UserId) of
+        [{UserId, Pid, Timestamp}] ->
+            IsFresh = erlang:monotonic_time(millisecond) - Timestamp < ?CACHE_TTL_MS,
+            IsAlive = erlang:is_process_alive(Pid),
+            case {IsFresh, IsAlive} of
+                {true, true} ->
+                    {hit, Pid};
+                _ ->
+                    ets:delete(?PID_CACHE_TABLE, UserId),
+                    miss
+            end;
+        [] ->
+            miss
+    end.
+
+-spec lookup_and_cache(user_id()) -> {ok, pid()} | {error, not_found}.
+lookup_and_cache(UserId) ->
+    case call_shard(UserId, {lookup, UserId}, ?DEFAULT_GEN_SERVER_TIMEOUT) of
+        {ok, Pid} ->
+            ets:insert(?PID_CACHE_TABLE, {UserId, Pid, erlang:monotonic_time(millisecond)}),
+            {ok, Pid};
+        _ ->
+            {error, not_found}
+    end.
+
+-spec lookup_and_cast(user_id(), term()) -> ok.
+lookup_and_cast(UserId, Message) ->
+    case call_shard(UserId, {lookup, UserId}, ?DEFAULT_GEN_SERVER_TIMEOUT) of
+        {ok, Pid} ->
+            ets:insert(?PID_CACHE_TABLE, {UserId, Pid, erlang:monotonic_time(millisecond)}),
+            gen_server:cast(Pid, Message);
+        _ ->
+            ok
+    end.
 
 -spec terminate_all_sessions(user_id()) -> ok | {error, term()}.
 terminate_all_sessions(UserId) ->
-    gen_server:call(?MODULE, {terminate_all_sessions, UserId}, ?DEFAULT_GEN_SERVER_TIMEOUT).
+    call_shard(UserId, {terminate_all_sessions, UserId}, ?DEFAULT_GEN_SERVER_TIMEOUT).
 
 -spec dispatch_to_user(user_id(), event_type(), term()) -> ok | {error, not_found}.
 dispatch_to_user(UserId, Event, Data) ->
-    gen_server:call(?MODULE, {dispatch, UserId, Event, Data}, ?DEFAULT_GEN_SERVER_TIMEOUT).
+    case call_shard(UserId, {dispatch, UserId, Event, Data}, ?DEFAULT_GEN_SERVER_TIMEOUT) of
+        ok ->
+            ok;
+        {error, not_found} ->
+            {error, not_found};
+        _ ->
+            {error, not_found}
+    end.
 
 -spec init(list()) -> {ok, state()}.
 init([]) ->
     process_flag(trap_exit, true),
-    {ShardCount, Source} = determine_shard_count(),
+    ensure_shard_table(),
+    ets:new(?PID_CACHE_TABLE, [named_table, public, set]),
+    {ShardCount, _Source} = determine_shard_count(),
     {ShardMap, _} = lists:foldl(
         fun(Index, {Acc, Counter}) ->
             case start_shard(Index) of
                 {ok, Shard} ->
                     {maps:put(Index, Shard, Acc), Counter + 1};
-                {error, Reason} ->
-                    logger:warning("[presence_manager] failed to start shard ~p: ~p", [
-                        Index, Reason
-                    ]),
+                {error, _Reason} ->
                     {Acc, Counter}
             end
         end,
         {#{}, 0},
         lists:seq(0, ShardCount - 1)
     ),
-    maybe_log_shard_source(presence_manager, ShardCount, Source),
-    {ok, #{shards => ShardMap, shard_count => ShardCount}}.
+    State = #{shards => ShardMap, shard_count => ShardCount},
+    sync_shard_table(State),
+    {ok, State}.
 
 -spec handle_call(term(), gen_server:from(), state()) -> {reply, term(), state()}.
 handle_call({lookup, UserId}, _From, State) ->
@@ -86,8 +161,7 @@ handle_call(get_local_count, _From, State) ->
 handle_call(get_global_count, _From, State) ->
     {Count, NewState} = aggregate_counts(get_global_count, State),
     {reply, {ok, Count}, NewState};
-handle_call(Request, _From, State) ->
-    logger:warning("[presence_manager] unknown request ~p", [Request]),
+handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
 -spec handle_cast(term(), state()) -> {noreply, state()}.
@@ -95,21 +169,21 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 -spec handle_info(term(), state()) -> {noreply, state()}.
-handle_info({'DOWN', Ref, process, _Pid, Reason}, State) ->
+handle_info({'DOWN', Ref, process, Pid, _Reason}, State) ->
+    clean_cache_by_pid(Pid),
     Shards = maps:get(shards, State),
     case find_shard_by_ref(Ref, Shards) of
         {ok, Index} ->
-            logger:warning("[presence_manager] shard ~p crashed: ~p", [Index, Reason]),
             {_ShardEntry, UpdatedState} = restart_shard(Index, State),
             {noreply, UpdatedState};
         not_found ->
             {noreply, State}
     end;
-handle_info({'EXIT', Pid, Reason}, State) ->
+handle_info({'EXIT', Pid, _Reason}, State) ->
+    clean_cache_by_pid(Pid),
     Shards = maps:get(shards, State),
     case find_shard_by_pid(Pid, Shards) of
         {ok, Index} ->
-            logger:warning("[presence_manager] shard ~p exited: ~p", [Index, Reason]),
             {_ShardEntry, UpdatedState} = restart_shard(Index, State),
             {noreply, UpdatedState};
         not_found ->
@@ -120,10 +194,11 @@ handle_info(_Info, State) ->
 
 -spec terminate(term(), state()) -> ok.
 terminate(_Reason, State) ->
+    catch ets:delete(?SHARD_TABLE),
+    catch ets:delete(?PID_CACHE_TABLE),
     Shards = maps:get(shards, State),
     lists:foreach(
-        fun(Shard) ->
-            Pid = maps:get(pid, Shard),
+        fun(#{pid := Pid}) ->
             catch gen_server:stop(Pid, shutdown, 5000)
         end,
         maps:values(Shards)
@@ -132,6 +207,7 @@ terminate(_Reason, State) ->
 
 -spec code_change(term(), term(), term()) -> {ok, state()}.
 code_change(_OldVsn, State, _Extra) when is_map(State) ->
+    sync_shard_table(State),
     {ok, State};
 code_change(_OldVsn, {state, Shards, ShardCount}, _Extra) ->
     ConvertedShards = maps:map(
@@ -140,7 +216,9 @@ code_change(_OldVsn, {state, Shards, ShardCount}, _Extra) ->
         end,
         Shards
     ),
-    {ok, #{shards => ConvertedShards, shard_count => ShardCount}}.
+    ConvertedState = #{shards => ConvertedShards, shard_count => ShardCount},
+    sync_shard_table(ConvertedState),
+    {ok, ConvertedState}.
 
 -spec determine_shard_count() -> {pos_integer(), configured | auto}.
 determine_shard_count() ->
@@ -156,6 +234,7 @@ start_shard(Index) ->
     case presence_manager_shard:start_link(Index) of
         {ok, Pid} ->
             Ref = erlang:monitor(process, Pid),
+            put_shard_pid(Index, Pid),
             {ok, #{pid => Pid, ref => Ref}};
         Error ->
             Error
@@ -167,19 +246,46 @@ restart_shard(Index, State) ->
         {ok, Shard} ->
             Shards = maps:get(shards, State),
             Updated = State#{shards := maps:put(Index, Shard, Shards)},
+            sync_shard_table(Updated),
             {Shard, Updated};
-        {error, Reason} ->
-            logger:error("[presence_manager] failed to restart shard ~p: ~p", [Index, Reason]),
+        {error, _Reason} ->
+            clear_shard_pid(Index),
             Dummy = #{pid => spawn(fun() -> exit(normal) end), ref => make_ref()},
             {Dummy, State}
+    end.
+
+-spec call_shard(user_id(), term(), pos_integer()) -> term().
+call_shard(Key, Request, Timeout) ->
+    case shard_pid_from_table(Key) of
+        {ok, Pid} ->
+            case catch gen_server:call(Pid, Request, Timeout) of
+                {'EXIT', {timeout, _}} ->
+                    {error, timeout};
+                {'EXIT', _} ->
+                    call_via_manager(Request, Timeout);
+                Reply ->
+                    Reply
+            end;
+        error ->
+            call_via_manager(Request, Timeout)
+    end.
+
+-spec call_via_manager(term(), pos_integer()) -> term().
+call_via_manager(Request, Timeout) ->
+    case catch gen_server:call(?MODULE, Request, Timeout + 1000) of
+        {'EXIT', {timeout, _}} ->
+            {error, timeout};
+        {'EXIT', _} ->
+            {error, unavailable};
+        Reply ->
+            Reply
     end.
 
 -spec forward_call(user_id(), term(), state()) -> {term(), state()}.
 forward_call(Key, Request, State) ->
     {ShardIndex, State1} = ensure_shard(Key, State),
     Shards = maps:get(shards, State1),
-    Shard = maps:get(ShardIndex, Shards),
-    Pid = maps:get(pid, Shard),
+    #{pid := Pid} = maps:get(ShardIndex, Shards),
     case catch gen_server:call(Pid, Request, ?DEFAULT_GEN_SERVER_TIMEOUT) of
         {'EXIT', _} ->
             {_ShardEntry, State2} = restart_shard(ShardIndex, State1),
@@ -191,17 +297,16 @@ forward_call(Key, Request, State) ->
 -spec aggregate_counts(term(), state()) -> {non_neg_integer(), state()}.
 aggregate_counts(Request, State) ->
     Shards = maps:get(shards, State),
-    Results =
-        [
-            begin
-                Pid = maps:get(pid, Shard),
-                case catch gen_server:call(Pid, Request, ?DEFAULT_GEN_SERVER_TIMEOUT) of
-                    {ok, Count} -> Count;
-                    _ -> 0
-                end
+    Results = [
+        begin
+            #{pid := Pid} = Shard,
+            case catch gen_server:call(Pid, Request, ?DEFAULT_GEN_SERVER_TIMEOUT) of
+                {ok, Count} -> Count;
+                _ -> 0
             end
-         || Shard <- maps:values(Shards)
-        ],
+        end
+     || Shard <- maps:values(Shards)
+    ],
     {lists:sum(Results), State}.
 
 -spec ensure_shard(user_id(), state()) -> {non_neg_integer(), state()}.
@@ -213,7 +318,7 @@ ensure_shard(Key, State) ->
         undefined ->
             {_ShardEntry, NewState} = restart_shard(Index, State),
             {Index, NewState};
-        #{pid := Pid} when is_pid(Pid) ->
+        #{pid := Pid} ->
             case erlang:is_process_alive(Pid) of
                 true ->
                     {Index, State};
@@ -230,6 +335,72 @@ select_shard(Key, Count) when Count > 0 ->
 -spec extract_user_id(term()) -> user_id().
 extract_user_id({start_or_lookup, #{user_id := UserId}}) -> UserId;
 extract_user_id(_) -> 0.
+
+-spec ensure_shard_table() -> ok.
+ensure_shard_table() ->
+    case ets:whereis(?SHARD_TABLE) of
+        undefined ->
+            _ = ets:new(?SHARD_TABLE, [named_table, public, set, {read_concurrency, true}]),
+            ok;
+        _ ->
+            ok
+    end.
+
+-spec sync_shard_table(state()) -> ok.
+sync_shard_table(State) ->
+    ensure_shard_table(),
+    _ = ets:delete_all_objects(?SHARD_TABLE),
+    ShardCount = maps:get(shard_count, State),
+    ets:insert(?SHARD_TABLE, {shard_count, ShardCount}),
+    Shards = maps:get(shards, State),
+    lists:foreach(
+        fun({Index, #{pid := Pid}}) ->
+            put_shard_pid(Index, Pid)
+        end,
+        maps:to_list(Shards)
+    ),
+    ok.
+
+-spec put_shard_pid(non_neg_integer(), pid()) -> ok.
+put_shard_pid(Index, Pid) ->
+    ensure_shard_table(),
+    ets:insert(?SHARD_TABLE, {{shard_pid, Index}, Pid}),
+    ok.
+
+-spec clear_shard_pid(non_neg_integer()) -> ok.
+clear_shard_pid(Index) ->
+    try ets:delete(?SHARD_TABLE, {shard_pid, Index}) of
+        _ ->
+            ok
+    catch
+        error:badarg ->
+            ok
+    end.
+
+-spec shard_pid_from_table(user_id()) -> {ok, pid()} | error.
+shard_pid_from_table(Key) ->
+    try
+        case ets:lookup(?SHARD_TABLE, shard_count) of
+            [{shard_count, ShardCount}] when is_integer(ShardCount), ShardCount > 0 ->
+                Index = select_shard(Key, ShardCount),
+                case ets:lookup(?SHARD_TABLE, {shard_pid, Index}) of
+                    [{{shard_pid, Index}, Pid}] when is_pid(Pid) ->
+                        case erlang:is_process_alive(Pid) of
+                            true ->
+                                {ok, Pid};
+                            false ->
+                                error
+                        end;
+                    _ ->
+                        error
+                end;
+            _ ->
+                error
+        end
+    catch
+        error:badarg ->
+            error
+    end.
 
 -spec find_shard_by_ref(reference(), #{non_neg_integer() => shard()}) ->
     {ok, non_neg_integer()} | not_found.
@@ -258,17 +429,24 @@ find_shard_by_pid(Pid, Shards) ->
 -spec default_shard_count() -> pos_integer().
 default_shard_count() ->
     Candidates = [
-        erlang:system_info(logical_processors_available), erlang:system_info(schedulers_online)
+        erlang:system_info(logical_processors_available),
+        erlang:system_info(schedulers_online)
     ],
     lists:max([C || C <- Candidates, is_integer(C), C > 0] ++ [1]).
 
--spec maybe_log_shard_source(atom(), pos_integer(), configured | auto) -> ok.
-maybe_log_shard_source(Name, Count, configured) ->
-    logger:info("[~p] starting with ~p shards (configured)", [Name, Count]),
-    ok;
-maybe_log_shard_source(Name, Count, auto) ->
-    logger:info("[~p] starting with ~p shards (auto)", [Name, Count]),
-    ok.
+-spec clean_cache_by_pid(pid()) -> ok.
+clean_cache_by_pid(Pid) ->
+    ets:foldl(
+        fun
+            ({UserId, CachedPid, _}, Acc) when CachedPid =:= Pid ->
+                ets:delete(?PID_CACHE_TABLE, UserId),
+                Acc;
+            (_, Acc) ->
+                Acc
+        end,
+        ok,
+        ?PID_CACHE_TABLE
+    ).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -283,6 +461,25 @@ determine_shard_count_auto_test() ->
         {Count, auto} = determine_shard_count(),
         ?assert(Count > 0)
     end).
+
+select_shard_test() ->
+    ?assert(select_shard(100, 4) >= 0),
+    ?assert(select_shard(100, 4) < 4).
+
+extract_user_id_test() ->
+    ?assertEqual(123, extract_user_id({start_or_lookup, #{user_id => 123}})),
+    ?assertEqual(0, extract_user_id(unknown)).
+
+find_shard_by_ref_test() ->
+    Ref1 = make_ref(),
+    Ref2 = make_ref(),
+    Shards = #{0 => #{pid => self(), ref => Ref1}, 1 => #{pid => self(), ref => Ref2}},
+    ?assertEqual({ok, 0}, find_shard_by_ref(Ref1, Shards)),
+    ?assertEqual({ok, 1}, find_shard_by_ref(Ref2, Shards)),
+    ?assertEqual(not_found, find_shard_by_ref(make_ref(), Shards)).
+
+default_shard_count_test() ->
+    ?assert(default_shard_count() >= 1).
 
 with_runtime_config(Key, Value, Fun) ->
     Original = fluxer_gateway_env:get(Key),

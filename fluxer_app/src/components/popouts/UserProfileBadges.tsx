@@ -17,50 +17,55 @@
  * along with Fluxer. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import styles from '@app/components/popouts/UserProfileBadges.module.css';
+import FocusRing from '@app/components/uikit/focus_ring/FocusRing';
+import {Tooltip} from '@app/components/uikit/tooltip/Tooltip';
+import {Routes} from '@app/Routes';
+import type {ProfileRecord} from '@app/records/ProfileRecord';
+import type {UserRecord} from '@app/records/UserRecord';
+import RuntimeConfigStore from '@app/stores/RuntimeConfigStore';
+import * as DateUtils from '@app/utils/DateUtils';
+import {cdnUrl} from '@app/utils/UrlUtils';
+import {PublicUserFlags, UserPremiumTypes} from '@fluxer/constants/src/UserConstants';
 import {useLingui} from '@lingui/react/macro';
 import {clsx} from 'clsx';
 import {observer} from 'mobx-react-lite';
-import React from 'react';
-import {UserFlags, UserPremiumTypes} from '~/Constants';
-import styles from '~/components/popouts/UserProfileBadges.module.css';
-import FocusRing from '~/components/uikit/FocusRing/FocusRing';
-import {Tooltip} from '~/components/uikit/Tooltip/Tooltip';
-import {Routes} from '~/Routes';
-import type {ProfileRecord} from '~/records/ProfileRecord';
-import type {UserRecord} from '~/records/UserRecord';
-import * as DateUtils from '~/utils/DateUtils';
-import {cdnUrl} from '~/utils/UrlUtils';
+import type React from 'react';
+import {useMemo} from 'react';
 
-interface Badge {
+interface BaseBadge {
 	key: string;
+	tooltip: string;
+	url: string;
+}
+interface IconBadge extends BaseBadge {
+	type: 'icon';
 	iconUrl: string;
-	tooltip: string;
-	url: string;
 }
-
-interface VirtualBadge {
-	key: string;
-	tooltip: string;
-	url: string;
-	component: React.ReactElement;
+interface TextBadge extends BaseBadge {
+	type: 'text';
+	text: string;
 }
+type Badge = IconBadge | TextBadge;
 
 interface UserProfileBadgesProps {
 	user: UserRecord;
 	profile: ProfileRecord | null;
 	isModal?: boolean;
 	isMobile?: boolean;
-	warningIndicator?: React.ReactNode;
 }
 
 export const UserProfileBadges: React.FC<UserProfileBadgesProps> = observer(
-	({user, profile, isModal = false, isMobile = false, warningIndicator}) => {
+	({user, profile, isModal = false, isMobile = false}) => {
 		const {t} = useLingui();
-		const badges = React.useMemo(() => {
+		const selfHosted = RuntimeConfigStore.isSelfHosted();
+
+		const badges = useMemo(() => {
 			const result: Array<Badge> = [];
 
-			if (user.flags & UserFlags.STAFF) {
+			if (user.flags & PublicUserFlags.STAFF) {
 				result.push({
+					type: 'icon',
 					key: 'staff',
 					iconUrl: cdnUrl('badges/staff.svg'),
 					tooltip: t`Fluxer Staff`,
@@ -68,8 +73,9 @@ export const UserProfileBadges: React.FC<UserProfileBadgesProps> = observer(
 				});
 			}
 
-			if (user.flags & UserFlags.CTP_MEMBER) {
+			if (!selfHosted && user.flags & PublicUserFlags.CTP_MEMBER) {
 				result.push({
+					type: 'icon',
 					key: 'ctp',
 					iconUrl: cdnUrl('badges/ctp.svg'),
 					tooltip: t`Fluxer Community Team`,
@@ -77,8 +83,9 @@ export const UserProfileBadges: React.FC<UserProfileBadgesProps> = observer(
 				});
 			}
 
-			if (user.flags & UserFlags.PARTNER) {
+			if (!selfHosted && user.flags & PublicUserFlags.PARTNER) {
 				result.push({
+					type: 'icon',
 					key: 'partner',
 					iconUrl: cdnUrl('badges/partner.svg'),
 					tooltip: t`Fluxer Partner`,
@@ -86,8 +93,9 @@ export const UserProfileBadges: React.FC<UserProfileBadgesProps> = observer(
 				});
 			}
 
-			if (user.flags & UserFlags.BUG_HUNTER) {
+			if (!selfHosted && user.flags & PublicUserFlags.BUG_HUNTER) {
 				result.push({
+					type: 'icon',
 					key: 'bug_hunter',
 					iconUrl: cdnUrl('badges/bug-hunter.svg'),
 					tooltip: t`Fluxer Bug Hunter`,
@@ -95,8 +103,9 @@ export const UserProfileBadges: React.FC<UserProfileBadgesProps> = observer(
 				});
 			}
 
-			if (profile?.premiumType && profile.premiumType !== UserPremiumTypes.NONE) {
+			if (!selfHosted && profile?.premiumType && profile.premiumType !== UserPremiumTypes.NONE) {
 				let tooltipText = t`Fluxer Plutonium`;
+				let badgeUrl = Routes.plutonium();
 
 				if (profile.premiumType === UserPremiumTypes.LIFETIME) {
 					if (profile.premiumSince) {
@@ -105,49 +114,35 @@ export const UserProfileBadges: React.FC<UserProfileBadgesProps> = observer(
 					} else {
 						tooltipText = `Fluxer Visionary`;
 					}
+					badgeUrl = Routes.helpArticle('visionary');
 				} else if (profile.premiumSince) {
 					const premiumSinceFormatted = DateUtils.getFormattedShortDate(profile.premiumSince);
 					tooltipText = `Fluxer Plutonium subscriber since ${premiumSinceFormatted}`;
 				}
 
 				result.push({
+					type: 'icon',
 					key: 'premium',
 					iconUrl: cdnUrl('badges/plutonium.svg'),
 					tooltip: tooltipText,
-					url: Routes.plutonium(),
+					url: badgeUrl,
 				});
+
+				if (profile.premiumType === UserPremiumTypes.LIFETIME && profile.premiumLifetimeSequence != null) {
+					result.push({
+						type: 'text',
+						key: 'premium_sequence',
+						text: `#${profile.premiumLifetimeSequence}`,
+						tooltip: t`Visionary ID #${profile.premiumLifetimeSequence}`,
+						url: badgeUrl,
+					});
+				}
 			}
 
 			return result;
-		}, [user.flags, profile?.premiumType, profile?.premiumSince]);
+		}, [selfHosted, user.flags, profile?.premiumType, profile?.premiumSince, profile?.premiumLifetimeSequence]);
 
-		const virtualBadges = React.useMemo(() => {
-			const result: Array<VirtualBadge> = [];
-
-			if (profile?.premiumType === UserPremiumTypes.LIFETIME && profile.premiumLifetimeSequence != null) {
-				const sequenceNumber = profile.premiumLifetimeSequence;
-
-				result.push({
-					key: 'lifetime_sequence',
-					tooltip: `Visionary #${sequenceNumber}`,
-					url: Routes.plutoniumVisionary(),
-					component: (
-						<div
-							className={clsx(
-								styles.virtualBadge,
-								isModal && isMobile ? styles.virtualBadgeMobile : styles.virtualBadgeDesktop,
-							)}
-						>
-							#{sequenceNumber}
-						</div>
-					),
-				});
-			}
-
-			return result;
-		}, [profile?.premiumType, profile?.premiumLifetimeSequence, isModal, isMobile]);
-
-		if (badges.length === 0 && virtualBadges.length === 0) {
+		if (badges.length === 0) {
 			return null;
 		}
 
@@ -158,32 +153,30 @@ export const UserProfileBadges: React.FC<UserProfileBadgesProps> = observer(
 		const badgeClassName = isModal && isMobile ? styles.badgeMobile : styles.badgeDesktop;
 		const isDesktopInteractions = !isMobile;
 
-		const renderInteractiveWrapper = (url: string, children: React.ReactNode, style?: React.CSSProperties) => {
+		const renderInteractiveWrapper = (url: string, children: React.ReactNode) => {
 			if (isDesktopInteractions) {
 				return (
-					<a href={url} target="_blank" rel="noopener noreferrer" className={styles.link} style={style}>
+					<a href={url} target="_blank" rel="noopener noreferrer" className={styles.link}>
 						{children}
 					</a>
 				);
 			}
 
-			return (
-				<div className={styles.link} style={style}>
-					{children}
-				</div>
-			);
-		};
-
-		const virtualBadgeStyle: React.CSSProperties = {
-			WebkitTapHighlightColor: 'transparent',
-			WebkitTouchCallout: 'none',
+			return <div className={styles.link}>{children}</div>;
 		};
 
 		return (
 			<div className={containerClassName}>
-				{warningIndicator}
 				{badges.map((badge) => {
-					const badgeContent = <img src={badge.iconUrl} alt={badge.tooltip} className={badgeClassName} />;
+					const sequenceClassName = isModal && isMobile ? styles.sequenceBadgeMobile : styles.sequenceBadgeDesktop;
+					const badgeContent =
+						badge.type === 'icon' ? (
+							<img src={badge.iconUrl} alt={badge.tooltip} className={badgeClassName} />
+						) : (
+							<span className={clsx(styles.sequenceBadge, sequenceClassName)} aria-hidden="true">
+								{badge.text}
+							</span>
+						);
 
 					return (
 						<Tooltip key={badge.key} text={badge.tooltip} maxWidth="xl">
@@ -191,11 +184,6 @@ export const UserProfileBadges: React.FC<UserProfileBadgesProps> = observer(
 						</Tooltip>
 					);
 				})}
-				{virtualBadges.map((badge) => (
-					<Tooltip key={badge.key} text={badge.tooltip} maxWidth="xl">
-						<FocusRing offset={-2}>{renderInteractiveWrapper(badge.url, badge.component, virtualBadgeStyle)}</FocusRing>
-					</Tooltip>
-				))}
 			</div>
 		);
 	},
